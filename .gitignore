@@ -7,3 +7,4 @@ log/*
 *.sh
 result/*/*
 test_files_dir/
+result_files_dir/

@@ -34,9 +34,9 @@ def get_opt():
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
 
     parser.add_argument("--dataroot", default="data")
-    parser.add_argument("--datamode", default="train")
+    parser.add_argument("--datamode", default="test")
     parser.add_argument("--stage", default="identity")
-    parser.add_argument("--data_list", default="train_pairs.txt")
+    parser.add_argument("--data_list", default="test_pairs.txt")
     parser.add_argument("--fine_width", type=int, default=192)
     parser.add_argument("--fine_height", type=int, default=256)
     parser.add_argument("--radius", type=int, default=5)
@@ -60,7 +60,7 @@ def test_identity_embedding(opt, train_loader, model, board):
 
     pbar = tqdm(train_loader, total=len(train_loader))
 
-    im_names = []
+    names = []
     embeddings_from_product = []
     embeddings_from_model = []
     for inputs_1, inputs_2 in pbar:
@@ -73,13 +73,13 @@ def test_identity_embedding(opt, train_loader, model, board):
         embeddings_from_product.append(pred_prod_embedding_1.cpu().detach())
         embeddings_from_model.append(pred_outfit_embedding_1.cpu().detach())
 
-        im_names += inputs_1["im_name"]
+        names += inputs_1["im_name"]
 
     embeddings_from_product = torch.cat(embeddings_from_product).numpy()
     embeddings_from_model = torch.cat(embeddings_from_model).numpy()
 
-    with open(os.path.join('data/identity_embedding.json'), 'w') as outfile:
-        json.dump({"embeddings_from_product": embeddings_from_product.tolist(), "embeddings_from_model": embeddings_from_model.tolist(), "im_names": im_names}, outfile)
+    with open(os.path.join('data/identity_embedding_test.json'), 'w') as outfile:
+        json.dump({"embeddings_from_product": embeddings_from_product.tolist(), "embeddings_from_model": embeddings_from_model.tolist(), "names": names}, outfile)
 
 
 

@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tryon_net import G
 
 import utils
 import argparse
@@ -20,7 +21,7 @@ from distributed import (
     reduce_sum,
     get_world_size,
 )
-
+from visualization import tensor_list_for_board
 def normalize(x):
     x = ((x+1)/2).clamp(0,1)
     return x
@@ -44,7 +45,7 @@ def get_opt():
     parser.add_argument("--dataroot", default="data")
     parser.add_argument("--datamode", default="test")
     parser.add_argument("--stage", default="residual")
-    parser.add_argument("--data_list", default="test_files/vton_test.txt")
+    parser.add_argument("--data_list", default="test_files/one_person_different_cloth.txt")
     parser.add_argument("--fine_width", type=int, default=192)
     parser.add_argument("--fine_height", type=int, default=256)
     parser.add_argument("--radius", type=int, default=5)
@@ -68,13 +69,8 @@ def test_residual(opt, loader, model, gmm_model, generator):
     gmm_model.eval()
     generator.eval()
 
-    test_files_dir = "test_files_dir/" + opt.name
+    test_files_dir = "result_files_dir/" + opt.name
     os.makedirs(test_files_dir, exist_ok=True)
-    os.makedirs(os.path.join(test_files_dir, "gt"), exist_ok=True)
-    os.makedirs(os.path.join(test_files_dir, "residual"), exist_ok=True)
-    os.makedirs(os.path.join(test_files_dir, "baseline"), exist_ok=True)
-    os.makedirs(os.path.join(test_files_dir, "refined"), exist_ok=True)
-    os.makedirs(os.path.join(test_files_dir, "diff"), exist_ok=True)
 
     for i, (inputs, inputs_2) in tqdm(enumerate(loader), total=len(loader)):
 
@@ -112,18 +108,13 @@ def test_residual(opt, loader, model, gmm_model, generator):
 
             output_1 = model(transfer_1.detach(), gt_residual.detach())
 
-            output_residual = torch.cat([normalize(gt_residual), normalize(gt_residual), normalize(gt_residual)], dim=1).cpu()
+            output_residual = torch.cat([gt_residual, gt_residual, gt_residual], dim=1).cpu()
+
+            visuals = [[output_residual],[transfer_1], [output_1], [output_1-transfer_1]]
+            tensors = tensor_list_for_board(visuals)
             for b_i in range(transfer_1.shape[0]):
-                save_image(normalize(im[b_i].cpu()),
-                           os.path.join(test_files_dir, "gt", str(i * opt.batch_size + b_i) + ".jpg"))
-                save_image(normalize(transfer_1[b_i].cpu()),
-                           os.path.join(test_files_dir, "baseline", str(i * opt.batch_size + b_i) + ".jpg"))
-                save_image(normalize(output_residual)[b_i],
-                           os.path.join(test_files_dir, "residual", str(i * opt.batch_size + b_i) + ".jpg"))
-                save_image(normalize(((transfer_1 - output_1) / 2)[b_i].cpu()),
-                           os.path.join(test_files_dir, "diff", str(i * opt.batch_size + b_i) + ".jpg"))
-                save_image(normalize(output_1[b_i].cpu()),
-                           os.path.join(test_files_dir, "refined", str(i * opt.batch_size + b_i) + ".jpg"))
+                save_image(tensors[b_i], os.path.join(test_files_dir, str(i * opt.batch_size + b_i) + ".jpg"))
+
 
 
 def main():
@@ -166,7 +157,7 @@ def main():
     load_checkpoint(embedder_model, "checkpoints/identity_train_64_dim/step_020000.pth")
     embedder_model = embedder_model.embedder_b.cuda()
 
-    model = UNet(n_channels=4, n_classes=3)
+    model = G()
     model.cuda()
 
     if not opt.checkpoint == '' and os.path.exists(opt.checkpoint):

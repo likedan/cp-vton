@@ -29,7 +29,7 @@ def get_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", default = "GMM")
     parser.add_argument("--gpu_ids", default = "")
-    parser.add_argument('-j', '--workers', type=int, default=32)
+    parser.add_argument('-j', '--workers', type=int, default=16)
     parser.add_argument('-b', '--batch-size', type=int, default=4)
 
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
@@ -49,8 +49,8 @@ def get_opt():
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
-    parser.add_argument("--display_count", type=int, default = 20)
-    parser.add_argument("--save_count", type=int, default = 100)
+    parser.add_argument("--display_count", type=int, default = 100)
+    parser.add_argument("--save_count", type=int, default = 5000)
     parser.add_argument("--keep_step", type=int, default = 100000)
     parser.add_argument("--decay_step", type=int, default = 100000)
     parser.add_argument("--shuffle", action='store_true', help='shuffle input data')
@@ -156,16 +156,17 @@ def train_tom(opt, train_loader, model, model_module, gmm_model, board):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-            
-        if (step+1) % opt.display_count == 0 and single_gpu_flag(opt):
-            board_add_images(board, 'combine', visuals, step+1)
+
+        if single_gpu_flag(opt):
+            if (step+1) % opt.display_count == 0:
+                board_add_images(board, str(step + 1), visuals, step + 1)
             board.add_scalar('metric', loss.item(), step+1)
             board.add_scalar('L1', loss_l1.item(), step+1)
             board.add_scalar('VGG', loss_vgg.item(), step+1)
             board.add_scalar('MaskL1', loss_mask.item(), step+1)
             t = time.time() - iter_start_time
-            print('step: %8d, time: %.3f, loss: %.4f, l1: %.4f, vgg: %.4f, mask: %.4f' 
-                    % (step+1, t, loss.item(), loss_l1.item(), 
+            print('step: %8d, time: %.3f, loss: %.4f, l1: %.4f, vgg: %.4f, mask: %.4f'
+                    % (step+1, t, loss.item(), loss_l1.item(),
                     loss_vgg.item(), loss_mask.item()), flush=True)
 
         if (step+1) % opt.save_count == 0 and single_gpu_flag(opt):
@@ -436,7 +437,6 @@ def train_identity_embedding(opt, train_loader, model, board):
         pbar = tqdm(pbar)
 
     for step in pbar:
-        iter_start_time = time.time()
         inputs_1, inputs_2 = train_loader.next_batch()
 
         img_1 = inputs_1['cloth'].cuda()
@@ -452,13 +452,10 @@ def train_identity_embedding(opt, train_loader, model, board):
             pred_outfit_embedding_2, pred_prod_embedding_2)) / 2
 
         # triplet loss
-        triplet_loss = triplet_criterion(pred_outfit_embedding_1, pred_prod_embedding_1,
-                                           pred_outfit_embedding_2) + triplet_criterion(pred_outfit_embedding_2,
-                                                                                        pred_prod_embedding_2,
-                                                                                        pred_outfit_embedding_1) + triplet_criterion(
-            pred_outfit_embedding_1, pred_prod_embedding_1, pred_prod_embedding_2) + triplet_criterion(
-            pred_outfit_embedding_2, pred_prod_embedding_2,
-            pred_prod_embedding_1)
+        triplet_loss = triplet_criterion(pred_outfit_embedding_1, pred_prod_embedding_1, pred_outfit_embedding_2) + \
+                       triplet_criterion(pred_outfit_embedding_2, pred_prod_embedding_2, pred_outfit_embedding_1) + \
+                       triplet_criterion(pred_outfit_embedding_1, pred_prod_embedding_1, pred_prod_embedding_2) + \
+                       triplet_criterion(pred_outfit_embedding_2, pred_prod_embedding_2, pred_prod_embedding_1)
 
         loss = mean_squared_loss + triplet_loss
         optimizer.zero_grad()
@@ -482,7 +479,7 @@ def train_residual_old(opt, train_loader, model, model_module, gmm_model, genera
                    discriminator=None, discriminator_module=None):
 
     lambdas_vis_reg = {'l1': 1.0, 'prc': 0.05, 'style': 100.0}
-    lambdas = {'adv': 0.25, 'identity': 20, 'mse': 50, 'vis_reg': 1, 'consist': 5}
+    lambdas = {'adv': 0.25, 'identity': 20, 'match_gt': 10, 'vis_reg': 1, 'consist': 10}
 
     model.train()
     gmm_model.eval()
@@ -592,6 +589,7 @@ def train_residual_old(opt, train_loader, model, model_module, gmm_model, genera
         transfer_1_feats = vgg_extractor(transfer_1)
         output_2_feats = vgg_extractor(output_2)
         transfer_2_feats = vgg_extractor(transfer_2)
+        gt_feats = vgg_extractor(im)
 
         style_reg = utils.compute_style_loss(output_1_feats, transfer_1_feats,
                                              l1_criterion) + utils.compute_style_loss(output_2_feats,
@@ -605,6 +603,10 @@ def train_residual_old(opt, train_loader, model, model_module, gmm_model, genera
         vis_reg_loss = l1_reg * lambdas_vis_reg["l1"] + style_reg * lambdas_vis_reg["style"] + perceptual_reg * \
                        lambdas_vis_reg["prc"]
 
+        # match ground truth loss
+        match_gt_loss = l1_criterion(output_1, im) * lambdas_vis_reg["l1"] + utils.compute_style_loss(output_1_feats, gt_feats, l1_criterion) * lambdas_vis_reg["style"] + utils.compute_perceptual_loss(output_1_feats, gt_feats, l1_criterion) * lambdas_vis_reg["prc"]
+
+
         # consistency loss
         consistency_loss = l1_criterion(transfer_1 - output_1, transfer_2 - output_2)
 
@@ -614,7 +616,7 @@ def train_residual_old(opt, train_loader, model, model_module, gmm_model, genera
                    [transfer_2, output_2, (transfer_2 - output_2) / 2]]
 
         total_loss = lambdas['identity'] * identity_loss + \
-                     lambdas['mse'] * mse_loss + \
+                     lambdas['match_gt'] * match_gt_loss + \
                      lambdas['vis_reg'] * vis_reg_loss + \
                      lambdas['consist'] * consistency_loss
 
@@ -626,20 +628,21 @@ def train_residual_old(opt, train_loader, model, model_module, gmm_model, genera
         optimizer.step()
 
         if single_gpu_flag(opt):
-            board_add_images(board, 'combine', visuals, step + 1)
+            if (step + 1) % opt.display_count == 0:
+                board_add_images(board, str(step + 1), visuals, step + 1)
             board.add_scalar('loss/total', total_loss.item(), step + 1)
             board.add_scalar('loss/identity', identity_loss.item(), step + 1)
             board.add_scalar('loss/vis_reg', vis_reg_loss.item(), step + 1)
-            board.add_scalar('loss/mse', mse_loss.item(), step + 1)
+            board.add_scalar('loss/match_gt', match_gt_loss.item(), step + 1)
             board.add_scalar('loss/consist', consistency_loss.item(), step + 1)
             if opt.use_gan:
                 board.add_scalar('loss/Dadv', D_loss.item(), step + 1)
                 board.add_scalar('loss/Gadv', G_adv_loss.item(), step + 1)
 
             pbar.set_description(
-                'step: %8d, loss: %.4f, identity: %.4f, vis_reg: %.4f, mse: %.4f, consist: %.4f'
+                'step: %8d, loss: %.4f, identity: %.4f, vis_reg: %.4f, match_gt: %.4f, consist: %.4f'
                 % (step + 1, total_loss.item(), identity_loss.item(),
-                   vis_reg_loss.item(), mse_loss.item(), consistency_loss.item()))
+                   vis_reg_loss.item(), match_gt_loss.item(), consistency_loss.item()))
 
         if (step + 1) % opt.save_count == 0 and single_gpu_flag(opt):
             save_checkpoint(model_module,
@@ -694,8 +697,6 @@ def main():
 
         model = UnetGenerator(25, 4, 6, ngf=64, norm_layer=nn.InstanceNorm2d)
         model.cuda()
-        # if opt.distributed:
-        #     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
         if not opt.checkpoint =='' and os.path.exists(opt.checkpoint):
             load_checkpoint(model, opt.checkpoint)
@@ -829,7 +830,7 @@ def main():
         gmm_model.cuda()
 
         generator_model = UnetGenerator(25, 4, 6, ngf=64, norm_layer=nn.InstanceNorm2d)
-        load_checkpoint(generator_model, "checkpoints/tom_train_new_2/step_070000.pth")
+        load_checkpoint(generator_model, "checkpoints/tom_train_new_2/step_040000.pth")
         generator_model.cuda()
 
         embedder_model = Embedder()

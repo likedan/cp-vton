@@ -89,7 +89,7 @@ def calculate_FID_infinity(dataloader, gt_m, gt_s, batch_size, num_points=15):
     """
     # load pretrained inception model
     inception_model = load_inception_net()
-    
+
     # get all activations of generated images
     activations = get_activations(dataloader, inception_model).cpu().numpy()
 
@@ -165,6 +165,7 @@ class im_dataset(Dataset):
     def __init__(self, data_dir):
         self.data_dir = data_dir
         self.imgpaths = self.get_imgpaths()
+        print(self.data_dir)
 
         self.transform = transforms.Compose([
             transforms.ToTensor()])
@@ -204,7 +205,8 @@ def compute_path_statistics(path, batch_size):
         raise RuntimeError('Invalid path: %s' % path)
 
     model = load_inception_net()
-    dataloader = torch.utils.data.DataLoader(im_dataset(path), batch_size=batch_size, drop_last=False, **{'num_workers': 8, 'pin_memory': False})
+    dataloader = torch.utils.data.DataLoader(im_dataset(path), batch_size=batch_size, drop_last=False,
+                                             **{'num_workers': 8, 'pin_memory': False})
     act = get_activations(dataloader, model).cpu().numpy()
     m, s = np.mean(act, axis=0), np.cov(act, rowvar=False)
     return m, s
@@ -404,20 +406,26 @@ if __name__ == '__main__':
 
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument('--batch-size', type=int, default=512,
+    parser.add_argument('--experiment-count', type=int, default=10,
+                        help='Batch size to use')
+    parser.add_argument('--batch-size', type=int, default=128,
                         help='Batch size to use')
 
     args = parser.parse_args()
 
-    root_path = "test_files_dir/residual_gan_train_new_more_consist_loss_base_model_2_step_070000/"
-    paths = ["baseline", "refined"]
-    
+    root_path = "test_files_dir/train_residual_resnet_consist_l1_step_155000/"
+    paths = ["refined"]
+
     data_m, data_s = compute_path_statistics("test_files_dir/GMM/gt", args.batch_size)
 
     for path in paths:
-        dataloader = torch.utils.data.DataLoader(im_dataset(root_path + path), 
-                                                 batch_size=args.batch_size, 
+        dataloader = torch.utils.data.DataLoader(im_dataset(root_path + path),
+                                                 batch_size=args.batch_size,
                                                  drop_last=False, **{'num_workers': 8, 'pin_memory': False})
-
-        FID =  calculate_FID_infinity(dataloader, data_m, data_s, args.batch_size)
-        print("FID inf", FID)
+        FIDS = []
+        for i in range(args.experiment_count):
+            FID = calculate_FID_infinity(dataloader, data_m, data_s, args.batch_size)
+            print("FID inf", FID)
+            FIDS.append(FID)
+        FIDS = np.array(FIDS)
+        print(np.mean(FIDS), np.std(FIDS))
