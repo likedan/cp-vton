@@ -467,13 +467,17 @@ class VGGLoss(nn.Module):
         self.weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]
         self.layids = layids
 
-    def forward(self, x, y):
+    def forward(self, x, y, mask=None):
         x_vgg, y_vgg = self.vgg(x), self.vgg(y)
         loss = 0
         if self.layids is None:
             self.layids = list(range(len(x_vgg)))
         for i in self.layids:
-            loss += self.weights[i] * self.criterion(x_vgg[i], y_vgg[i].detach())
+            if mask == None:
+                loss += self.weights[i] * self.criterion(x_vgg[i], y_vgg[i].detach())
+            else:
+                interpolated_mask = F.interpolate(mask, size=(x_vgg[i].shape[2], x_vgg[i].shape[3]), mode='bilinear')[:,0:1,:,:].repeat(1, x_vgg[i].shape[1], 1, 1)
+                loss += self.weights[i] * torch.mean(torch.abs(interpolated_mask * x_vgg[i] - interpolated_mask * y_vgg[i].detach()))
         return loss
 
 class UNet(nn.Module):
@@ -719,7 +723,7 @@ class FPN(nn.Module):
 
     def forward(self, x):
         # Bottom-up
-        c1 = F.relu(self.bn1(self.conv1(x)))
+        c1 = self.conv1(x)
         # c1 = F.max_pool2d(c1, kernel_size=3, stride=2, padding=1)
         c2 = self.layer1(c1) # torch.Size([batch, 256, 64, 48])
         c3 = self.layer2(c2) # torch.Size([batch, 256, 32, 24])
@@ -749,8 +753,8 @@ class CLothFlowWarper(nn.Module):
 
     def __init__(self, opt):
         super(CLothFlowWarper, self).__init__()
-        self.fpn_source = FPN(Bottleneck, [2,2,2,2], 3)
-        self.fpn_target = FPN(Bottleneck, [2,2,2,2], 22)
+        self.fpn_source = FPN(Bottleneck, [2,2,2,2], 4)
+        self.fpn_target = FPN(Bottleneck, [2,2,2,2], 3)
 
         self.encoder_5 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
         self.encoder_4 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
@@ -763,34 +767,35 @@ class CLothFlowWarper(nn.Module):
         # self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
         # self.unet = WarperUNet(25, 1)
 
-    def forward(self, inputA, inputB):
-        p1_A, p2_A, p3_A, p4_A, p5_A = self.fpn_source(inputB)
-        p1_B, p2_B, p3_B, p4_B, p5_B = self.fpn_target(inputA)
+    def forward(self, target, source):
+        p1_S, p2_S, p3_S, p4_S, p5_S = self.fpn_source(source)
+        p1_T, p2_T, p3_T, p4_T, p5_T = self.fpn_target(target)
 
-        f5 = self.encoder_5(torch.cat([p5_A, p5_B], dim=1))
+        f5 = self.encoder_5(torch.cat([p5_S, p5_T], dim=1))
         u5 = F.upsample(f5, size=(f5.shape[2] * 2, f5.shape[3] * 2), mode='nearest')
-        warp_4_a = F.grid_sample(p4_A, u5.permute(0,2,3,1))
-        f4 = u5 + self.encoder_4(torch.cat([warp_4_a, p4_B], dim=1))
+
+        warp_4_a = F.grid_sample(p4_S, u5.permute(0,2,3,1))
+        f4 = u5 + self.encoder_4(torch.cat([warp_4_a, p4_T], dim=1))
         u4 = F.upsample(f4, size=(f4.shape[2] * 2, f4.shape[3] * 2), mode='nearest')
 
-        warp_3_a = F.grid_sample(p3_A, u4.permute(0,2,3,1))
-        f3 = u4 + self.encoder_3(torch.cat([warp_3_a, p3_B], dim=1))
+        warp_3_a = F.grid_sample(p3_S, u4.permute(0,2,3,1))
+        f3 = u4 + self.encoder_3(torch.cat([warp_3_a, p3_T], dim=1))
         u3 = F.upsample(f3, size=(f3.shape[2] * 2, f3.shape[3] * 2), mode='nearest')
 
-        warp_2_a = F.grid_sample(p2_A, u3.permute(0,2,3,1))
-        f2 = u3 + self.encoder_2(torch.cat([warp_2_a, p2_B], dim=1))
+        warp_2_a = F.grid_sample(p2_S, u3.permute(0,2,3,1))
+        f2 = u3 + self.encoder_2(torch.cat([warp_2_a, p2_T], dim=1))
         u2 = F.upsample(f2, size=(f2.shape[2] * 2, f2.shape[3] * 2), mode='nearest')
 
-        warp_1_a = F.grid_sample(p2_A, u2.permute(0,2,3,1))
-        f1 = self.encoder_1(torch.cat([warp_1_a, p1_B], dim=1))
+        warp_1_a = F.grid_sample(p1_S, u2.permute(0,2,3,1))
+        f1 = self.encoder_1(torch.cat([warp_1_a, p1_T], dim=1))
         f1 = F.upsample(f1, size=(f1.shape[2] * 2, f1.shape[3] * 2), mode='nearest')
 
         # grid = F.affine_grid(torch.tensor([[[1,0,0],[0,1,0]] for _ in range(12)], dtype=float), u2.size())
         # print(f1.shape, grid.shape)
         grid = f1.permute(0,2,3,1)
-        warped_cloth = F.grid_sample(inputB, grid, padding_mode='border')
+        # warped_cloth = F.grid_sample(inputB, grid, padding_mode='border')
         tv_loss = self.tv_loss(f5) + self.tv_loss(f4) + self.tv_loss(f3) + self.tv_loss(f2) + self.tv_loss(f1)
-        return warped_cloth, grid, tv_loss
+        return grid, tv_loss
         # return warped_cloth, grid, theta, confidence_map
 
 
