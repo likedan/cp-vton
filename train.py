@@ -8,7 +8,7 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet
+from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, CLothFlowWarper
 from resnet import Embedder
 from unet import UNet, VGGExtractor, Discriminator, AccDiscriminator
 from torch.utils.tensorboard import SummaryWriter
@@ -39,7 +39,7 @@ def get_opt():
 
     parser.add_argument("--dataroot", default = "data")
     parser.add_argument("--datamode", default = "train")
-    parser.add_argument("--stage", default = "GMM")
+    parser.add_argument("--stage", default = "CLOTHFLOW")
     parser.add_argument("--data_list", default = "train_pairs.txt")
     parser.add_argument("--fine_width", type=int, default = 192)
     parser.add_argument("--fine_height", type=int, default = 256)
@@ -51,8 +51,8 @@ def get_opt():
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
-    parser.add_argument("--display_count", type=int, default = 100)
-    parser.add_argument("--save_count", type=int, default = 10000)
+    parser.add_argument("--display_count", type=int, default = 50)
+    parser.add_argument("--save_count", type=int, default = 5000)
     parser.add_argument("--keep_step", type=int, default = 100000)
     parser.add_argument("--decay_step", type=int, default = 100000)
     parser.add_argument("--shuffle", action='store_true', help='shuffle input data')
@@ -344,6 +344,82 @@ def train_tom_gmm_multi_warps(opt, train_loader, model, model_module, gmm_model,
             save_checkpoint(gmm_model_module, os.path.join(opt.checkpoint_dir, opt.name, 'step_warp_%06d.pth' % (step + 1)))
 
 
+def train_cloth_flow(opt, train_loader, model, model_module, gmm_model, gmm_model_module, board):
+    model.train()
+    gmm_model.train()
+
+    # criterion
+    criterionL1 = nn.L1Loss()
+    criterionVGG = VGGLoss()
+    criterionMask = nn.L1Loss()
+
+    # optimizer
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(gmm_model.parameters()), lr=opt.lr, betas=(0.5, 0.999))
+
+    for step in range(opt.keep_step + opt.decay_step):
+        iter_start_time = time.time()
+        inputs = train_loader.next_batch()
+
+        im = inputs['image'].cuda()
+        im_pose = inputs['pose_image']
+        im_h = inputs['head']
+        shape = inputs['shape']
+        im_c =  inputs['parse_cloth'].cuda()
+
+        agnostic = inputs['agnostic'].cuda()
+        c = inputs['cloth'].cuda()
+        cm = inputs['cloth_mask'].cuda()
+
+        warped_cloth, grid, tv_loss = gmm_model(agnostic, c)
+        warped_mask = F.grid_sample(cm, grid, padding_mode='zeros')
+
+        # outputs = model(torch.cat([agnostic] + [warped_cloth], 1))
+        # p_tryon = F.tanh(outputs)
+
+        warp_mask = (im_c != 1).float().cuda()
+
+        def normalize(x):
+            return x * 2 - 1
+
+        def unnormalize(x):
+            return (x + 1) / 2
+
+        visuals = [[im_h, shape, im_pose],
+                   [c, normalize(cm), normalize(warped_mask)],
+                   [warped_cloth, warped_mask, normalize(unnormalize(im_c) * warp_mask)],]
+        # [p_tryon, im],
+        #
+        # loss_l1 = criterionL1(p_tryon, im)
+
+        loss_warp = criterionL1(warped_cloth, im_c)
+        loss_vgg = criterionVGG(normalize(unnormalize(warped_cloth) * warp_mask), normalize(unnormalize(im_c) * warp_mask))
+
+        loss_l1 = loss_warp
+
+        loss = loss_warp * 10 + tv_loss * 2 + loss_vgg # loss_l1 + loss_vgg +
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if (step + 1) % opt.display_count == 0 and single_gpu_flag(opt):
+            board_add_images(board, 'combine' + str(step + 1), visuals, step + 1)
+
+            t = time.time() - iter_start_time
+            print('step: %8d, time: %.3f, loss: %.4f, l1: %.4f, vgg: %.4f, warp: %.4f, tv: %.4f'
+                  % (step + 1, t, loss.item(), loss_l1.item(),
+                     loss_vgg.item(), loss_warp.item(), tv_loss.item()), flush=True)
+
+        board.add_scalar('LOSS/metric', loss.item(), step + 1)
+        board.add_scalar('LOSS/L1', loss_l1.item(), step + 1)
+        board.add_scalar('LOSS/VGG', loss_vgg.item(), step + 1)
+        board.add_scalar('LOSS/Warp', loss_warp.item(), step + 1)
+        board.add_scalar('LOSS/tv', tv_loss.item(), step + 1)
+
+        if (step + 1) % opt.save_count == 0 and single_gpu_flag(opt):
+            save_checkpoint(model_module, os.path.join(opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
+            save_checkpoint(gmm_model_module, os.path.join(opt.checkpoint_dir, opt.name, 'step_warp_%06d.pth' % (step + 1)))
+
+
 def main():
     opt = get_opt()
     print(opt)
@@ -460,6 +536,36 @@ def main():
 
 
         train_tom_gmm_multi_warps(opt, train_loader, model, model_module, gmm_model, gmm_model_module, board)
+        if single_gpu_flag(opt):
+            save_checkpoint(model_module, os.path.join(opt.checkpoint_dir, opt.name, 'tom_final.pth'))
+
+    elif opt.stage == 'CLOTHFLOW':
+
+        gmm_model = CLothFlowWarper(opt)
+        gmm_model.cuda()
+
+        model = UNet(n_channels=22 + 3, n_classes=3)
+        model.cuda()
+
+        if not opt.checkpoint =='' and os.path.exists(opt.checkpoint):
+            load_checkpoint(model, opt.checkpoint)
+
+        model_module = model
+        gmm_model_module = gmm_model
+        if opt.distributed:
+            model = torch.nn.parallel.DistributedDataParallel(model,
+                                                                       device_ids=[local_rank],
+                                                                       output_device=local_rank,
+                                                                       find_unused_parameters=True)
+            model_module = model.module
+            gmm_model = torch.nn.parallel.DistributedDataParallel(gmm_model,
+                                                                       device_ids=[local_rank],
+                                                                       output_device=local_rank,
+                                                                       find_unused_parameters=True)
+            gmm_model_module = gmm_model.module
+
+
+        train_cloth_flow(opt, train_loader, model, model_module, gmm_model, gmm_model_module, board)
         if single_gpu_flag(opt):
             save_checkpoint(model_module, os.path.join(opt.checkpoint_dir, opt.name, 'tom_final.pth'))
 
