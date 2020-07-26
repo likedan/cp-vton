@@ -8,7 +8,7 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, CLothFlowWarper
+from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, CLothFlowWarper, GMM_k_warps_Affine
 from resnet import Embedder
 from unet import UNet, VGGExtractor, Discriminator, AccDiscriminator
 from torch.utils.tensorboard import SummaryWriter
@@ -21,6 +21,7 @@ from distributed import (
     reduce_sum,
     get_world_size,
 )
+import eval
 
 def single_gpu_flag(args):
     return not args.distributed or (args.distributed and args.local_rank % torch.cuda.device_count() == 0)
@@ -34,6 +35,9 @@ def get_opt():
 
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
 
+    parser.add_argument("--test",  action='store_true')
+    parser.add_argument("--warper_type", default = "TPS")
+
     parser.add_argument("--use_gan",  action='store_true')
     parser.add_argument("--no_consist",  action='store_true')
 
@@ -45,16 +49,16 @@ def get_opt():
     parser.add_argument("--fine_height", type=int, default = 256)
     parser.add_argument("--radius", type=int, default = 5)
     parser.add_argument("--grid_size", type=int, default = 5)
-    parser.add_argument("--k_warps", type=int, default = 4)
+    parser.add_argument("--k_warps", type=int, default = 2)
 
     parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate for adam')
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
     parser.add_argument("--display_count", type=int, default = 100)
-    parser.add_argument("--save_count", type=int, default = 10000)
-    parser.add_argument("--keep_step", type=int, default = 100000)
-    parser.add_argument("--decay_step", type=int, default = 100000)
+    parser.add_argument("--save_count", type=int, default = 20000)
+    parser.add_argument("--keep_step", type=int, default = 200000)
+    parser.add_argument("--decay_step", type=int, default = 200000)
     parser.add_argument("--shuffle", action='store_true', help='shuffle input data')
 
     opt = parser.parse_args()
@@ -370,7 +374,7 @@ def train_cloth_flow(opt, train_loader, model, model_module, gmm_model, gmm_mode
         c = inputs['cloth'].cuda()
         cm = inputs['cloth_mask'].cuda()
 
-        warp_mask = (im_c != 1).float().cuda()
+        warp_mask = (torch.min(im_c, dim=1)[0].unsqueeze(1) != 1).float().cuda()
         # torch.cat([agnostic, warp_mask], dim=1)
         grid, tv_loss = gmm_model(warp_mask, torch.cat([c, cm], dim=1))
         warped_mask = F.grid_sample(cm, grid, padding_mode='border')
@@ -387,19 +391,19 @@ def train_cloth_flow(opt, train_loader, model, model_module, gmm_model, gmm_mode
             return (x + 1) / 2
 
         visuals = [[im_h, shape, im_pose],
-                   [c, normalize(cm), normalize(warp_mask)],
-                   [warped_cloth, normalize(warped_mask), normalize(unnormalize(im_c) * warp_mask)],]
+                   [c, normalize(cm), normalize(warp_mask.repeat(1,3,1,1))],
+                   [warped_cloth, normalize(warped_mask), im_c],]
         # [p_tryon, im],
         #
         # loss_l1 = criterionL1(p_tryon, im)
         # print(torch.max(warped_mask), torch.min(warped_mask), torch.max(warp_mask), torch.min(warp_mask))
-        loss_warp = criterionL1(warped_mask, warp_mask[:,0:1,:,:])
+        loss_warp = criterionL1(warped_mask, warp_mask)
         loss_vgg = criterionVGG(warped_cloth, im_c, mask=warp_mask)
         # loss_vgg = criterionVGG(normalize(unnormalize(warped_cloth) * warp_mask), normalize(unnormalize(im_c) * warp_mask))
 
         loss_l1 = loss_warp
 
-        loss = loss_warp * 10 + tv_loss * 10 + loss_vgg # loss_l1 + loss_vgg +
+        loss = loss_warp * 10 + tv_loss * 2 + loss_vgg # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -514,7 +518,11 @@ def main():
 
     elif opt.stage == 'TOM+WARP+kWarps':
 
-        gmm_model = GMM_k_warps(opt)
+        if opt.warper_type == "TPS":
+            gmm_model = GMM_k_warps(opt)
+        else:
+            gmm_model = GMM_k_warps_Affine(opt)
+
         gmm_model.cuda()
 
         model = UNet(n_channels=22 + 3 * opt.k_warps, n_classes=3)
@@ -522,6 +530,7 @@ def main():
 
         if not opt.checkpoint =='' and os.path.exists(opt.checkpoint):
             load_checkpoint(model, opt.checkpoint)
+            load_checkpoint(gmm_model, opt.checkpoint.replace("step_", "step_warp_"))
 
         model_module = model
         gmm_model_module = gmm_model
@@ -537,10 +546,7 @@ def main():
                                                                        find_unused_parameters=True)
             gmm_model_module = gmm_model.module
 
-
         train_tom_gmm_multi_warps(opt, train_loader, model, model_module, gmm_model, gmm_model_module, board)
-        if single_gpu_flag(opt):
-            save_checkpoint(model_module, os.path.join(opt.checkpoint_dir, opt.name, 'tom_final.pth'))
 
     elif opt.stage == 'CLOTHFLOW':
 

@@ -476,7 +476,7 @@ class VGGLoss(nn.Module):
             if mask == None:
                 loss += self.weights[i] * self.criterion(x_vgg[i], y_vgg[i].detach())
             else:
-                interpolated_mask = F.interpolate(mask, size=(x_vgg[i].shape[2], x_vgg[i].shape[3]), mode='bilinear')[:,0:1,:,:].repeat(1, x_vgg[i].shape[1], 1, 1)
+                interpolated_mask = F.interpolate(mask, size=(x_vgg[i].shape[2], x_vgg[i].shape[3]), mode='bilinear').repeat(1, x_vgg[i].shape[1], 1, 1)
                 loss += self.weights[i] * torch.mean(torch.abs(interpolated_mask * x_vgg[i] - interpolated_mask * y_vgg[i].detach()))
         return loss
 
@@ -618,6 +618,65 @@ class GMM_k_warps(nn.Module):
 
         return warped_clothes, grids, thetas
 
+
+class GMM_k_warps_Affine(nn.Module):
+    """ Geometric Matching Module
+    """
+
+    def __init__(self, opt):
+        super(GMM_k_warps_Affine, self).__init__()
+        self.extractionA = FeatureExtraction(22, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.extractionB = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.l2norm = FeatureL2Norm()
+        self.correlation = FeatureCorrelation()
+        self.conv = nn.Sequential(
+            nn.Conv2d(192, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        self.warp_num = opt.k_warps
+        self.fc = nn.Linear(64 * 4 * 3, 6*self.warp_num)
+        self.fc.weight.data.zero_()
+        values = []
+        for i in [1, 0, 0, 0, 1, 0]:
+            for _ in range(self.warp_num):
+                values.append(i)
+        self.fc.bias.data.copy_(torch.tensor(values, dtype=torch.float))
+        self.opt = opt
+
+    def forward(self, inputA, inputB):
+        featureA = self.extractionA(inputA)
+        featureB = self.extractionB(inputB)
+        featureA = self.l2norm(featureA)
+        featureB = self.l2norm(featureB)
+        correlation = self.correlation(featureA, featureB)
+        x = self.conv(correlation)
+        x = x.reshape((x.shape[0], 64 * 4 * 3))
+        x = self.fc(x)
+
+        thetas = []
+        grids = []
+        warped_clothes = []
+
+        affine_transform = x.view(-1, 2, 3, self.warp_num)
+
+        for i in range(self.warp_num):
+            thetas.append(affine_transform[:,:,:,i])
+            grid = F.affine_grid(affine_transform[:,:,:,i], inputB.size())
+            warped_clothes.append(F.grid_sample(inputB, grid, padding_mode="border"))
+
+        return warped_clothes, grids, thetas
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -754,13 +813,17 @@ class CLothFlowWarper(nn.Module):
     def __init__(self, opt):
         super(CLothFlowWarper, self).__init__()
         self.fpn_source = FPN(Bottleneck, [2,2,2,2], 4)
-        self.fpn_target = FPN(Bottleneck, [2,2,2,2], 3)
+        self.fpn_target = FPN(Bottleneck, [2,2,2,2], 1)
 
-        self.encoder_5 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
-        self.encoder_4 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
-        self.encoder_3 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
-        self.encoder_2 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
-        self.encoder_1 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1), nn.Tanh())
+        self.encoder_5 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
+        self.encoder_4 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
+        self.encoder_3 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
+        self.encoder_2 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
+        self.encoder_1 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
+
+        for encoder in [self.encoder_1, self.encoder_2, self.encoder_3, self.encoder_4, self.encoder_5]:
+            encoder[0].weight.data.zero_()
+            print(encoder[0].weight.shape, encoder[0].bias.shape)
 
         self.tv_loss = TVLoss()
         # self.regression = FeatureRegression(input_nc=192, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
@@ -774,24 +837,24 @@ class CLothFlowWarper(nn.Module):
         f5 = self.encoder_5(torch.cat([p5_S, p5_T], dim=1))
         u5 = F.upsample(f5, size=(f5.shape[2] * 2, f5.shape[3] * 2), mode='nearest')
 
-        warp_4_a = F.grid_sample(p4_S, u5.permute(0,2,3,1))
-        f4 = u5 + self.encoder_4(torch.cat([warp_4_a, p4_T], dim=1))
+        warp_4_S = F.grid_sample(p4_S, u5.permute(0,2,3,1))
+        f4 = u5 + self.encoder_4(torch.cat([warp_4_S, p4_T], dim=1))
         u4 = F.upsample(f4, size=(f4.shape[2] * 2, f4.shape[3] * 2), mode='nearest')
 
-        warp_3_a = F.grid_sample(p3_S, u4.permute(0,2,3,1))
-        f3 = u4 + self.encoder_3(torch.cat([warp_3_a, p3_T], dim=1))
+        warp_3_S = F.grid_sample(p3_S, u4.permute(0,2,3,1))
+        f3 = u4 + self.encoder_3(torch.cat([warp_3_S, p3_T], dim=1))
         u3 = F.upsample(f3, size=(f3.shape[2] * 2, f3.shape[3] * 2), mode='nearest')
 
-        warp_2_a = F.grid_sample(p2_S, u3.permute(0,2,3,1))
-        f2 = u3 + self.encoder_2(torch.cat([warp_2_a, p2_T], dim=1))
+        warp_2_S = F.grid_sample(p2_S, u3.permute(0,2,3,1))
+        f2 = u3 + self.encoder_2(torch.cat([warp_2_S, p2_T], dim=1))
         u2 = F.upsample(f2, size=(f2.shape[2] * 2, f2.shape[3] * 2), mode='nearest')
 
-        warp_1_a = F.grid_sample(p1_S, u2.permute(0,2,3,1))
-        f1 = self.encoder_1(torch.cat([warp_1_a, p1_T], dim=1))
-        f1 = F.upsample(f1, size=(f1.shape[2] * 2, f1.shape[3] * 2), mode='nearest')
+        warp_1_S = F.grid_sample(p1_S, u2.permute(0,2,3,1))
+        f1 = self.encoder_1(torch.cat([warp_1_S, p1_T], dim=1))
 
+        f1 = F.upsample(f1, size=(f1.shape[2] * 2, f1.shape[3] * 2), mode='nearest')
         # grid = F.affine_grid(torch.tensor([[[1,0,0],[0,1,0]] for _ in range(12)], dtype=float), u2.size())
-        # print(f1.shape, grid.shape)
+        # print(f1.shape)
         grid = f1.permute(0,2,3,1)
         # warped_cloth = F.grid_sample(inputB, grid, padding_mode='border')
         tv_loss = self.tv_loss(f5) + self.tv_loss(f4) + self.tv_loss(f3) + self.tv_loss(f2) + self.tv_loss(f1)
