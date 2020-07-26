@@ -459,10 +459,11 @@ class Vgg19(nn.Module):
         return out
 
 class VGGLoss(nn.Module):
-    def __init__(self, layids = None):
+    def __init__(self, layids = None, cuda=True):
         super(VGGLoss, self).__init__()
         self.vgg = Vgg19()
-        self.vgg.cuda()
+        if cuda:
+            self.vgg.cuda()
         self.criterion = nn.L1Loss()
         self.weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]
         self.layids = layids
@@ -727,19 +728,17 @@ class Bottleneck(nn.Module):
 class FPN(nn.Module):
     def __init__(self, block, num_blocks, input_channel_size):
         super(FPN, self).__init__()
-        self.in_planes = 64
-
-        self.conv1 = nn.Conv2d(input_channel_size, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.in_planes = input_channel_size
 
         # Bottom-up layers
-        self.layer1 = self._make_layer(block,  64, num_blocks[0], stride=2)
-        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.layer1 = self._make_layer(block,  input_channel_size, num_blocks[0], stride=2)
+        self.layer2 = self._make_layer(block, 64, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, 128, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, 256, num_blocks[3], stride=2)
+        self.layer5 = self._make_layer(block, 256, num_blocks[4], stride=2)
 
         # Top layer
-        self.toplayer = nn.Conv2d(2048, 256, kernel_size=1, stride=1, padding=0)  # Reduce channels
+        self.toplayer = nn.Conv2d(1024, 256, kernel_size=1, stride=1, padding=0)  # Reduce channels
 
         # Smooth layers
         self.smooth1 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
@@ -748,10 +747,10 @@ class FPN(nn.Module):
         self.smooth4 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
 
         # Lateral layers
-        self.latlayer1 = nn.Conv2d(1024, 256, kernel_size=1, stride=1, padding=0)
-        self.latlayer2 = nn.Conv2d( 512, 256, kernel_size=1, stride=1, padding=0)
-        self.latlayer3 = nn.Conv2d( 256, 256, kernel_size=1, stride=1, padding=0)
-        self.latlayer4 = nn.Conv2d( 64, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer1 = nn.Conv2d(input_channel_size*4, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer2 = nn.Conv2d( 256, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer3 = nn.Conv2d( 512, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer4 = nn.Conv2d( 1024, 256, kernel_size=1, stride=1, padding=0)
 
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1]*(num_blocks-1)
@@ -782,26 +781,26 @@ class FPN(nn.Module):
 
     def forward(self, x):
         # Bottom-up
-        c1 = self.conv1(x)
         # c1 = F.max_pool2d(c1, kernel_size=3, stride=2, padding=1)
-        c2 = self.layer1(c1) # torch.Size([batch, 256, 64, 48])
-        c3 = self.layer2(c2) # torch.Size([batch, 256, 32, 24])
-        c4 = self.layer3(c3) # torch.Size([batch, 256, 16, 12])
-        c5 = self.layer4(c4) # torch.Size([batch, 256, 8, 6])
+        c1 = self.layer1(x) # torch.Size([batch, 256, 64, 48])
+        c2 = self.layer2(c1) # torch.Size([batch, 256, 32, 24])
+        c3 = self.layer3(c2) # torch.Size([batch, 256, 16, 12])
+        c4 = self.layer4(c3) # torch.Size([batch, 256, 8, 6])
+        c5 = self.layer5(c4) # torch.Size([batch, 256, 8, 6])
 
 
         # Top-down
         p5 = self.toplayer(c5) # torch.Size([batch, 256, 8, 6])
-        p4 = self._upsample_add(p5, self.latlayer1(c4)) # torch.Size([batch, 256, 16, 12])
-        p3 = self._upsample_add(p4, self.latlayer2(c3)) # torch.Size([batch, 256, 32, 24])
-        p2 = self._upsample_add(p3, self.latlayer3(c2)) # torch.Size([batch, 256, 64, 48])
-        p1 = self._upsample_add(p2, self.latlayer4(c1)) # torch.Size([batch, 256, 64, 48])
+        p4 = self._upsample_add(p5, self.latlayer4(c4)) # torch.Size([batch, 256, 16, 12])
+        p3 = self._upsample_add(p4, self.latlayer3(c3)) # torch.Size([batch, 256, 32, 24])
+        p2 = self._upsample_add(p3, self.latlayer2(c2)) # torch.Size([batch, 256, 64, 48])
+        p1 = self._upsample_add(p2, self.latlayer1(c1)) # torch.Size([batch, 256, 64, 48])
 
         # Smooth
-        p4 = self.smooth1(p4)
-        p3 = self.smooth2(p3)
-        p2 = self.smooth3(p2)
-        p1 = self.smooth4(p1)
+        # p4 = self.smooth1(p4)
+        # p3 = self.smooth2(p3)
+        # p2 = self.smooth3(p2)
+        # p1 = self.smooth4(p1)
 
         return p1, p2, p3, p4, p5
 
@@ -812,8 +811,8 @@ class CLothFlowWarper(nn.Module):
 
     def __init__(self, opt):
         super(CLothFlowWarper, self).__init__()
-        self.fpn_source = FPN(Bottleneck, [2,2,2,2], 4)
-        self.fpn_target = FPN(Bottleneck, [2,2,2,2], 1)
+        self.fpn_source = FPN(Bottleneck, [2,2,2,2,2], 4)
+        self.fpn_target = FPN(Bottleneck, [2,2,2,2,2], 1)
 
         self.encoder_5 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
         self.encoder_4 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
@@ -823,7 +822,7 @@ class CLothFlowWarper(nn.Module):
 
         for encoder in [self.encoder_1, self.encoder_2, self.encoder_3, self.encoder_4, self.encoder_5]:
             encoder[0].weight.data.zero_()
-            print(encoder[0].weight.shape, encoder[0].bias.shape)
+            # print(encoder[0].weight.shape, encoder[0].bias.shape)
 
         self.tv_loss = TVLoss()
         # self.regression = FeatureRegression(input_nc=192, output_dim=2 * opt.grid_size ** 2, use_cuda=True)

@@ -354,7 +354,7 @@ def train_cloth_flow(opt, train_loader, model, model_module, gmm_model, gmm_mode
 
     # criterion
     criterionL1 = nn.L1Loss()
-    criterionVGG = VGGLoss()
+    criterionVGG = VGGLoss(cuda=True)
     criterionMask = nn.L1Loss()
 
     # optimizer
