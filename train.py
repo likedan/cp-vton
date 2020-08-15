@@ -403,7 +403,7 @@ def train_cloth_flow(opt, train_loader, model, model_module, gmm_model, gmm_mode
 
         loss_l1 = loss_warp
 
-        loss = loss_warp * 10 + tv_loss * 2 + loss_vgg # loss_l1 + loss_vgg +
+        loss = loss_warp * 10 + tv_loss * 50 + loss_vgg # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

@@ -8,7 +8,7 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, CLothFlowWarper
+from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, CLothFlowWarper, GMM_k_warps_Affine
 from resnet import Embedder
 from unet import UNet, VGGExtractor, Discriminator, AccDiscriminator
 from torch.utils.tensorboard import SummaryWriter
@@ -27,6 +27,7 @@ def get_opt():
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
     parser.add_argument("--use_gan",  action='store_true')
     parser.add_argument("--no_consist",  action='store_true')
+    parser.add_argument("--warper_type", default = "TPS")
 
     parser.add_argument("--dataroot", default = "data")
     parser.add_argument("--datamode", default = "test")
@@ -78,8 +79,6 @@ def test_tom_gmm_multi_warps(opt, loader, model, gmm_model):
             warped_cloths, grids, thetas = gmm_model(agnostic, c_2)
             outputs = model(torch.cat([agnostic] + warped_cloths, 1))
         p_tryon = F.tanh(outputs)
-
-        calculate_inception_score.inception_score(p_tryon)
 
         for b_i in range(im.shape[0]):
             save_image(normalize(im[b_i].cpu()),
@@ -165,7 +164,10 @@ def main():
 
     elif opt.stage == 'TOM+WARP+kWarps':
 
-        gmm_model = GMM_k_warps(opt)
+        if opt.warper_type == "TPS":
+            gmm_model = GMM_k_warps(opt)
+        else:
+            gmm_model = GMM_k_warps_Affine(opt)
         gmm_model.cuda()
 
         model = UNet(n_channels=22 + 3 * opt.k_warps, n_classes=3)
