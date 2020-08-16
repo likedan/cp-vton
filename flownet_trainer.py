@@ -26,7 +26,7 @@ def single_gpu_flag(args):
 
 def get_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", default="flow_warp")
+    parser.add_argument("--name", default="flow_warp_identity_grid")
     parser.add_argument("--gpu_ids", default="")
     parser.add_argument('-j', '--workers', type=int, default=16)
     parser.add_argument('-b', '--batch-size', type=int, default=24)
@@ -49,7 +49,7 @@ def get_opt():
     parser.add_argument("--grid_size", type=int, default=5)
     parser.add_argument("--k_warps", type=int, default=2)
 
-    parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate for adam')
+    parser.add_argument('--lr', type=float, default=0.00005, help='initial learning rate for adam')
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
@@ -113,10 +113,11 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         loss_structure = criterionL1(warped_mask, warp_mask)
         loss_vgg = criterionVGG(warped_cloth, im_c, mask=warp_mask)
         # loss_vgg = criterionVGG(warped_cloth, im_c)
-        loss = loss_structure * 100 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
+        loss = loss_structure * 10 + tv_loss * 10 + loss_vgg * 1  # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
 
         if (step + 1) % opt.display_count == 0 and single_gpu_flag(opt):
             board_add_images(board, 'combine' + str(step + 1), visuals, step + 1)

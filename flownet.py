@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from flowloss import flow_loss
+import numpy as np
+
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -124,6 +126,9 @@ class CLothFlowWarper(nn.Module):
         self.encoder_2 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
         self.encoder_1 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
 
+        # for encoder in [self.encoder_1, self.encoder_2, self.encoder_3, self.encoder_4, self.encoder_5]:
+        #     encoder[0].weight.data.zero_()
+        #     encoder[0].bias.data.zero_()
         # self.tv_loss = flow_loss()
 
     def tv_loss(self, image):
@@ -138,28 +143,37 @@ class CLothFlowWarper(nn.Module):
         p1_S, p2_S, p3_S, p4_S, p5_S = self.fpn_source(source)
         p1_T, p2_T, p3_T, p4_T, p5_T = self.fpn_target(target)
 
+        theta_np = np.array([[1, 0, 0], [0, 1, 0]]).reshape((1, 2, 3))
+        theta = torch.from_numpy(theta_np).to(target.device).float()
+        theta = theta.repeat((target.shape[0], 1, 1))
+
         f5 = self.encoder_5(torch.cat([p5_S, p5_T], dim=1))
         u5 = F.upsample(f5, size=(f5.shape[2] * 2, f5.shape[3] * 2), mode='nearest')
 
-        warp_4_S = F.grid_sample(p4_S, u5.permute(0,2,3,1))
+        identity_flowfield = F.affine_grid(theta, u5.size())
+        warp_4_S = F.grid_sample(p4_S, u5.permute(0,2,3,1) + identity_flowfield)
         f4 = u5 + self.encoder_4(torch.cat([warp_4_S, p4_T], dim=1))
         u4 = F.upsample(f4, size=(f4.shape[2] * 2, f4.shape[3] * 2), mode='nearest')
 
-        warp_3_S = F.grid_sample(p3_S, u4.permute(0,2,3,1))
+        identity_flowfield = F.affine_grid(theta, u4.size())
+        warp_3_S = F.grid_sample(p3_S, u4.permute(0,2,3,1) + identity_flowfield)
         f3 = u4 + self.encoder_3(torch.cat([warp_3_S, p3_T], dim=1))
         u3 = F.upsample(f3, size=(f3.shape[2] * 2, f3.shape[3] * 2), mode='nearest')
 
-        warp_2_S = F.grid_sample(p2_S, u3.permute(0,2,3,1))
+        identity_flowfield = F.affine_grid(theta, u3.size())
+        warp_2_S = F.grid_sample(p2_S, u3.permute(0,2,3,1) + identity_flowfield)
         f2 = u3 + self.encoder_2(torch.cat([warp_2_S, p2_T], dim=1))
         u2 = F.upsample(f2, size=(f2.shape[2] * 2, f2.shape[3] * 2), mode='nearest')
 
-        warp_1_S = F.grid_sample(p1_S, u2.permute(0,2,3,1))
+        identity_flowfield = F.affine_grid(theta, u2.size())
+        warp_1_S = F.grid_sample(p1_S, u2.permute(0,2,3,1) + identity_flowfield)
         f1 = self.encoder_1(torch.cat([warp_1_S, p1_T], dim=1))
 
         u1 = F.upsample(f1, size=(f1.shape[2] * 2, f1.shape[3] * 2), mode='nearest')
         # grid = F.affine_grid(torch.tensor([[[1,0,0],[0,1,0]] for _ in range(12)], dtype=float), u2.size())
         # print(f1.shape)
-        grid = u1.permute(0,2,3,1)
+        identity_flowfield = F.affine_grid(theta, u1.size())
+        grid = u1.permute(0,2,3,1) + identity_flowfield
         # warped_cloth = F.grid_sample(inputB, grid, padding_mode='border')
         tv_loss = self.tv_loss(f5) + self.tv_loss(f4) + self.tv_loss(f3) + self.tv_loss(f2) + self.tv_loss(f1)
         return grid, tv_loss
