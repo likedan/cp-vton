@@ -113,7 +113,7 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         loss_structure = criterionL1(warped_mask, warp_mask)
         loss_vgg = criterionVGG(warped_cloth, im_c, mask=warp_mask)
         # loss_vgg = criterionVGG(warped_cloth, im_c)
-        loss = loss_structure * 20 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
+        loss = loss_structure * 100 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
