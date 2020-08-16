@@ -8,8 +8,9 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, CLothFlowWarper, \
+from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, \
     GMM_k_warps_Affine
+from flownet import CLothFlowWarper
 from resnet import Embedder
 from torch.utils.tensorboard import SummaryWriter
 from visualization import board_add_images
@@ -28,7 +29,7 @@ def get_opt():
     parser.add_argument("--name", default="flow_warp")
     parser.add_argument("--gpu_ids", default="")
     parser.add_argument('-j', '--workers', type=int, default=16)
-    parser.add_argument('-b', '--batch-size', type=int, default=4)
+    parser.add_argument('-b', '--batch-size', type=int, default=24)
 
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
 
@@ -109,12 +110,10 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         #
         # loss_l1 = criterionL1(p_tryon, im)
         # print(torch.max(warped_mask), torch.min(warped_mask), torch.max(warp_mask), torch.min(warp_mask))
-        loss_warp = criterionL1(warped_mask, warp_mask)
+        loss_structure = criterionL1(warped_mask, warp_mask)
         loss_vgg = criterionVGG(warped_cloth, im_c, mask=warp_mask)
-
-        loss_l1 = loss_warp
-
-        loss = loss_warp * 25 + tv_loss * 100 + loss_vgg  # loss_l1 + loss_vgg +
+        # loss_vgg = criterionVGG(warped_cloth, im_c)
+        loss = loss_structure * 20 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -123,14 +122,13 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
             board_add_images(board, 'combine' + str(step + 1), visuals, step + 1)
 
             t = time.time() - iter_start_time
-            print('step: %8d, time: %.3f, loss: %.4f, l1: %.4f, vgg: %.4f, warp: %.4f, tv: %.4f'
-                  % (step + 1, t, loss.item(), loss_l1.item(),
-                     loss_vgg.item(), loss_warp.item(), tv_loss.item()), flush=True)
+            print('step: %8d, time: %.3f, loss: %.4f, l1: %.4f, vgg: %.4f, tv: %.4f'
+                  % (step + 1, t, loss.item(), loss_structure.item(),
+                     loss_vgg.item(), tv_loss.item()), flush=True)
 
         board.add_scalar('LOSS/metric', loss.item(), step + 1)
-        board.add_scalar('LOSS/L1', loss_l1.item(), step + 1)
+        board.add_scalar('LOSS/struc', loss_structure.item(), step + 1)
         board.add_scalar('LOSS/VGG', loss_vgg.item(), step + 1)
-        board.add_scalar('LOSS/Warp', loss_warp.item(), step + 1)
         board.add_scalar('LOSS/tv', tv_loss.item(), step + 1)
 
         if (step + 1) % opt.save_count == 0 and single_gpu_flag(opt):

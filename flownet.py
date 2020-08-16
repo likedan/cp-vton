@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flowloss import flow_loss
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -123,8 +124,7 @@ class CLothFlowWarper(nn.Module):
         self.encoder_2 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
         self.encoder_1 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
 
-        for encoder in [self.encoder_1, self.encoder_2, self.encoder_3, self.encoder_4, self.encoder_5]:
-            encoder[0].bias.data.zero_()
+        # self.tv_loss = flow_loss()
 
     def tv_loss(self, image):
         # shift one pixel and get difference (for both x and y direction)
