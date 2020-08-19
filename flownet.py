@@ -120,15 +120,10 @@ class CLothFlowWarper(nn.Module):
         self.fpn_source = FPN(Bottleneck, [2,2,2,2,2], 4)
         self.fpn_target = FPN(Bottleneck, [2,2,2,2,2], 1)
 
-        self.encoder_5 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
-        self.encoder_4 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
-        self.encoder_3 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
-        self.encoder_2 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
-        self.encoder_1 = nn.Sequential(nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1))
+        self.flow_encoders = nn.ModuleList([nn.Conv2d(512, 2, kernel_size=3, stride=1, padding=1) for _ in range(5)])
 
-        # for encoder in [self.encoder_1, self.encoder_2, self.encoder_3, self.encoder_4, self.encoder_5]:
-        #     encoder[0].weight.data.zero_()
-        #     encoder[0].bias.data.zero_()
+        for encoder in self.flow_encoders:
+            encoder.bias.data.zero_()
 
     def tv_loss(self, image):
         # shift one pixel and get difference (for both x and y direction)
@@ -146,14 +141,14 @@ class CLothFlowWarper(nn.Module):
         # theta = torch.from_numpy(theta_np).to(target.device).float()
         # theta = theta.repeat((target.shape[0], 1, 1))
 
-        flow = self.encoder_5(torch.cat([source_features[4], target_features[4]], dim=1))
+        flow = self.flow_encoders[4](torch.cat([source_features[4], target_features[4]], dim=1))
         flows = [flow]
         upsampled_flow = F.upsample(flow, size=(flow.shape[2] * 2, flow.shape[3] * 2), mode='nearest')
 
         for i in reversed(range(4)):
             "i: 3,2,1,0"
             warped_source = F.grid_sample(source_features[i], upsampled_flow.permute(0,2,3,1))
-            flow = upsampled_flow + getattr(self, "encoder_{}".format(i+1))(torch.cat([warped_source, target_features[i]], dim=1))
+            flow = upsampled_flow + self.flow_encoders[i](torch.cat([warped_source, target_features[i]], dim=1))
             flows.append(flow)
             upsampled_flow = F.upsample(flow, size=(flow.shape[2] * 2, flow.shape[3] * 2), mode='nearest')
 

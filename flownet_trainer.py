@@ -49,11 +49,11 @@ def get_opt():
     parser.add_argument("--grid_size", type=int, default=5)
     parser.add_argument("--k_warps", type=int, default=2)
 
-    parser.add_argument('--lr', type=float, default=0.00001, help='initial learning rate for adam')
+    parser.add_argument('--lr', type=float, default=0.00002, help='initial learning rate for adam')
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
-    parser.add_argument("--display_count", type=int, default=25)
+    parser.add_argument("--display_count", type=int, default=100)
     parser.add_argument("--save_count", type=int, default=20000)
     parser.add_argument("--keep_step", type=int, default=200000)
     parser.add_argument("--decay_step", type=int, default=200000)
@@ -110,7 +110,7 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         # loss_l1 = criterionL1(p_tryon, im)
         loss_structure = criterionL1(warped_mask, normalize(warp_mask))
         loss_vgg = criterionVGG(warped_cloth, im_c)
-        loss = loss_structure * 10 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
+        loss = loss_structure * 20 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
