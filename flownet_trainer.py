@@ -26,10 +26,10 @@ def single_gpu_flag(args):
 
 def get_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", default="flow_warp_identity_grid")
+    parser.add_argument("--name", default="flow_warp")
     parser.add_argument("--gpu_ids", default="")
     parser.add_argument('-j', '--workers', type=int, default=16)
-    parser.add_argument('-b', '--batch-size', type=int, default=24)
+    parser.add_argument('-b', '--batch-size', type=int, default=32)
 
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
 
@@ -49,11 +49,11 @@ def get_opt():
     parser.add_argument("--grid_size", type=int, default=5)
     parser.add_argument("--k_warps", type=int, default=2)
 
-    parser.add_argument('--lr', type=float, default=0.00005, help='initial learning rate for adam')
+    parser.add_argument('--lr', type=float, default=0.00001, help='initial learning rate for adam')
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
-    parser.add_argument("--display_count", type=int, default=100)
+    parser.add_argument("--display_count", type=int, default=25)
     parser.add_argument("--save_count", type=int, default=20000)
     parser.add_argument("--keep_step", type=int, default=200000)
     parser.add_argument("--decay_step", type=int, default=200000)
@@ -88,32 +88,29 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         c = inputs['cloth'].cuda()
         cm = inputs['cloth_mask'].cuda()
 
+        def normalize(x):
+            return x * 2 - 1
+
         warp_mask = (torch.min(im_c, dim=1)[0].unsqueeze(1) != 1).float().cuda()
         # torch.cat([agnostic, warp_mask], dim=1)
         grid, tv_loss = gmm_model(warp_mask, torch.cat([c, cm], dim=1))
-        warped_mask = F.grid_sample(cm, grid, padding_mode='border')
+
+        warped_mask = F.grid_sample(normalize(cm), grid, padding_mode='border')
         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
 
         # outputs = model(torch.cat([agnostic] + [warped_cloth], 1))
         # p_tryon = F.tanh(outputs)
 
-        def normalize(x):
-            return x * 2 - 1
-
-        def unnormalize(x):
-            return (x + 1) / 2
-
         visuals = [[im_h, shape, im_pose],
-                   [c, normalize(cm), normalize(warp_mask.repeat(1, 3, 1, 1))],
-                   [warped_cloth, normalize(warped_mask), im_c], ]
+                   [c, normalize(cm), normalize(warp_mask)],
+                   [warped_cloth, warped_mask, im_c], ]
+
         # [p_tryon, im],
         #
         # loss_l1 = criterionL1(p_tryon, im)
-        # print(torch.max(warped_mask), torch.min(warped_mask), torch.max(warp_mask), torch.min(warp_mask))
-        loss_structure = criterionL1(warped_mask, warp_mask)
-        loss_vgg = criterionVGG(warped_cloth, im_c, mask=warp_mask)
-        # loss_vgg = criterionVGG(warped_cloth, im_c)
-        loss = loss_structure * 10 + tv_loss * 10 + loss_vgg * 1  # loss_l1 + loss_vgg +
+        loss_structure = criterionL1(warped_mask, normalize(warp_mask))
+        loss_vgg = criterionVGG(warped_cloth, im_c)
+        loss = loss_structure * 10 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

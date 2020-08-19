@@ -147,10 +147,11 @@ class CLothFlowWarper(nn.Module):
         # theta = theta.repeat((target.shape[0], 1, 1))
 
         flow = self.encoder_5(torch.cat([source_features[4], target_features[4]], dim=1))
-        upsampled_flow = F.upsample(flow, size=(flow.shape[2] * 2, flow.shape[3] * 2), mode='nearest')
         flows = [flow]
+        upsampled_flow = F.upsample(flow, size=(flow.shape[2] * 2, flow.shape[3] * 2), mode='nearest')
 
         for i in reversed(range(4)):
+            "i: 3,2,1,0"
             warped_source = F.grid_sample(source_features[i], upsampled_flow.permute(0,2,3,1))
             flow = upsampled_flow + getattr(self, "encoder_{}".format(i+1))(torch.cat([warped_source, target_features[i]], dim=1))
             flows.append(flow)
@@ -158,6 +159,6 @@ class CLothFlowWarper(nn.Module):
 
         grid = upsampled_flow.permute(0,2,3,1)
         tv_loss = 0
-        for flow in flows:
-            tv_loss += self.tv_loss(flow)
+        for f in flows:
+            tv_loss += self.tv_loss(f)
         return grid, tv_loss
