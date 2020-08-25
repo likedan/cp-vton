@@ -39,9 +39,10 @@ class FPN(nn.Module):
         self.in_planes = input_channel_size
 
         # Bottom-up layers
-        self.layer1 = self._make_layer(block,  input_channel_size, num_blocks[0], stride=2)
-        self.layer2 = self._make_layer(block, 64, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, 128, num_blocks[2], stride=2)
+        self.layer1 = self._make_layer(block,  64, num_blocks[0], stride=2)
+        print(self.layer1)
+        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 256, num_blocks[3], stride=2)
         self.layer5 = self._make_layer(block, 256, num_blocks[4], stride=2)
 
@@ -49,15 +50,15 @@ class FPN(nn.Module):
         self.toplayer = nn.Conv2d(1024, 256, kernel_size=1, stride=1, padding=0)  # Reduce channels
 
         # Smooth layers
-        self.smooth1 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
-        self.smooth2 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
-        self.smooth3 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
-        self.smooth4 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
+        # self.smooth1 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
+        # self.smooth2 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
+        # self.smooth3 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
+        # self.smooth4 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
 
         # Lateral layers
-        self.latlayer1 = nn.Conv2d(input_channel_size*4, 256, kernel_size=1, stride=1, padding=0)
-        self.latlayer2 = nn.Conv2d( 256, 256, kernel_size=1, stride=1, padding=0)
-        self.latlayer3 = nn.Conv2d( 512, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer1 = nn.Conv2d(256, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer2 = nn.Conv2d( 512, 256, kernel_size=1, stride=1, padding=0)
+        self.latlayer3 = nn.Conv2d( 1024, 256, kernel_size=1, stride=1, padding=0)
         self.latlayer4 = nn.Conv2d( 1024, 256, kernel_size=1, stride=1, padding=0)
 
     def _make_layer(self, block, planes, num_blocks, stride):
@@ -105,10 +106,10 @@ class FPN(nn.Module):
         p1 = self._upsample_add(p2, self.latlayer1(c1)) # torch.Size([batch, 256, 64, 48])
 
         # Smooth
-        p4 = self.smooth1(p4)
-        p3 = self.smooth2(p3)
-        p2 = self.smooth3(p2)
-        p1 = self.smooth4(p1)
+        # p4 = self.smooth1(p4)
+        # p3 = self.smooth2(p3)
+        # p2 = self.smooth3(p2)
+        # p1 = self.smooth4(p1)
 
         return p1, p2, p3, p4, p5
 
@@ -125,12 +126,6 @@ class CLothFlowWarper(nn.Module):
         for encoder in self.flow_encoders:
             encoder.bias.data.zero_()
 
-    def tv_loss(self, image):
-        # shift one pixel and get difference (for both x and y direction)
-        loss = torch.mean(torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])) + \
-               torch.mean(torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :]))
-        return loss
-
     def forward(self, target, source):
         # source is product
         # target is garment on model masked
@@ -141,19 +136,17 @@ class CLothFlowWarper(nn.Module):
         # theta = torch.from_numpy(theta_np).to(target.device).float()
         # theta = theta.repeat((target.shape[0], 1, 1))
 
-        flow = self.flow_encoders[4](torch.cat([source_features[4], target_features[4]], dim=1))
+        flow = self.flow_encoders[4](torch.cat([source_features[4], target_features[4]], dim=1)).clamp(-1,1)
         flows = [flow]
         upsampled_flow = F.upsample(flow, size=(flow.shape[2] * 2, flow.shape[3] * 2), mode='nearest')
 
         for i in reversed(range(4)):
             "i: 3,2,1,0"
-            warped_source = F.grid_sample(source_features[i], upsampled_flow.permute(0,2,3,1))
+            warped_source = F.grid_sample(source_features[i], upsampled_flow.permute(0,2,3,1), padding_mode='border')
             flow = upsampled_flow + self.flow_encoders[i](torch.cat([warped_source, target_features[i]], dim=1))
+            flow = flow.clamp(-1,1)
             flows.append(flow)
             upsampled_flow = F.upsample(flow, size=(flow.shape[2] * 2, flow.shape[3] * 2), mode='nearest')
 
         grid = upsampled_flow.permute(0,2,3,1)
-        tv_loss = 0
-        for f in flows:
-            tv_loss += self.tv_loss(f)
-        return grid, tv_loss
+        return grid, flows

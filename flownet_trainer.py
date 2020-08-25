@@ -2,13 +2,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import torchvision
 import utils
 import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, GMM_k_warps, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, UNet, \
+from networks import GMM, GMM_k_warps, UnetGenerator, load_checkpoint, save_checkpoint, UNet, \
     GMM_k_warps_Affine
 from flownet import CLothFlowWarper
 from resnet import Embedder
@@ -19,6 +19,35 @@ from distributed import (
     synchronize,
 )
 
+class VGGExtractor(torch.nn.Module):
+    def __init__(self, resize=True):
+        super(VGGExtractor, self).__init__()
+        vgg16 = torchvision.models.vgg16(pretrained=True).eval()
+        blocks = []
+        blocks.append(vgg16.features[:4])
+        blocks.append(vgg16.features[4:9])
+        blocks.append(vgg16.features[9:16])
+        blocks.append(vgg16.features[16:23])
+        for bl in blocks:
+            for p in bl:
+                p.requires_grad = False
+        self.blocks = torch.nn.ModuleList(blocks)
+        self.transform = torch.nn.functional.interpolate
+        self.mean = torch.nn.Parameter(torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
+        self.std = torch.nn.Parameter(torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
+        self.resize = resize
+
+    def forward(self, input):
+        if input.shape[1] != 3:
+            input = input.repeat(1, 3, 1, 1)
+        input = (input-self.mean) / self.std
+        if self.resize:
+            input = self.transform(input, mode='bilinear', size=(224, 224), align_corners=False)
+        output = []
+        for block in self.blocks:
+            input = block(input)
+            output.append(input)
+        return output
 
 def single_gpu_flag(args):
     return not args.distributed or (args.distributed and args.local_rank % torch.cuda.device_count() == 0)
@@ -26,10 +55,10 @@ def single_gpu_flag(args):
 
 def get_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", default="flow_warp")
+    parser.add_argument("--name", default="flow_warp_clamp")
     parser.add_argument("--gpu_ids", default="")
-    parser.add_argument('-j', '--workers', type=int, default=16)
-    parser.add_argument('-b', '--batch-size', type=int, default=32)
+    parser.add_argument('-j', '--workers', type=int, default=20)
+    parser.add_argument('-b', '--batch-size', type=int, default=12)
 
     parser.add_argument('--local_rank', type=int, default=0, help="gpu to use, used for distributed training")
 
@@ -49,12 +78,12 @@ def get_opt():
     parser.add_argument("--grid_size", type=int, default=5)
     parser.add_argument("--k_warps", type=int, default=2)
 
-    parser.add_argument('--lr', type=float, default=0.00002, help='initial learning rate for adam')
+    parser.add_argument('--lr', type=float, default=0.00001, help='initial learning rate for adam')
     parser.add_argument('--tensorboard_dir', type=str, default='tensorboard', help='save tensorboard infos')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='save checkpoint infos')
     parser.add_argument('--checkpoint', type=str, default='', help='model checkpoint for initialization')
     parser.add_argument("--display_count", type=int, default=100)
-    parser.add_argument("--save_count", type=int, default=20000)
+    parser.add_argument("--save_count", type=int, default=10000)
     parser.add_argument("--keep_step", type=int, default=200000)
     parser.add_argument("--decay_step", type=int, default=200000)
     parser.add_argument("--shuffle", action='store_true', help='shuffle input data')
@@ -69,7 +98,7 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
 
     # criterion
     criterionL1 = nn.L1Loss()
-    criterionVGG = VGGLoss(cuda=True)
+    vgg_extractor = VGGExtractor().cuda().eval()
 
     # optimizer
     optimizer = torch.optim.Adam(list(gmm_model.parameters()), lr=opt.lr, betas=(0.5, 0.999))
@@ -87,16 +116,24 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         agnostic = inputs['agnostic'].cuda()
         c = inputs['cloth'].cuda()
         cm = inputs['cloth_mask'].cuda()
+        # cm = (torch.min(c, dim=1)[0].unsqueeze(1) != 1).float().cuda()
 
         def normalize(x):
             return x * 2 - 1
 
+        def unnormalize(x):
+            return (x + 1) / 2
+
         warp_mask = (torch.min(im_c, dim=1)[0].unsqueeze(1) != 1).float().cuda()
         # torch.cat([agnostic, warp_mask], dim=1)
-        grid, tv_loss = gmm_model(warp_mask, torch.cat([c, cm], dim=1))
+        grid, flows = gmm_model(warp_mask, torch.cat([c, cm], dim=1))
 
-        warped_mask = F.grid_sample(normalize(cm), grid, padding_mode='border')
-        warped_cloth = F.grid_sample(c, grid, padding_mode='border')
+        tv_loss = 0
+        for f in flows:
+            tv_loss += compute_tv_loss(f, cm)
+
+        warped_mask = F.grid_sample(normalize(cm), grid, padding_mode='zeros')
+        warped_cloth = F.grid_sample(c, grid, padding_mode='zeros')
 
         # outputs = model(torch.cat([agnostic] + [warped_cloth], 1))
         # p_tryon = F.tanh(outputs)
@@ -109,12 +146,19 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
         #
         # loss_l1 = criterionL1(p_tryon, im)
         loss_structure = criterionL1(warped_mask, normalize(warp_mask))
-        loss_vgg = criterionVGG(warped_cloth, im_c)
+
+        real_feats = vgg_extractor(unnormalize(im_c))
+        fake_feats = vgg_extractor(unnormalize(warped_cloth))
+        loss_vgg = 0
+        for a, b in zip(real_feats, fake_feats):
+            interpolated_mask = F.interpolate(warp_mask, size=(a.shape[2], a.shape[3]),
+                                              mode='bilinear').repeat(1, a.shape[1], 1, 1)
+            loss_vgg += torch.mean(torch.abs(a - b) * interpolated_mask)
+
         loss = loss_structure * 20 + tv_loss * 2 + loss_vgg * 1  # loss_l1 + loss_vgg +
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
 
         if (step + 1) % opt.display_count == 0 and single_gpu_flag(opt):
             board_add_images(board, 'combine' + str(step + 1), visuals, step + 1)
@@ -124,16 +168,27 @@ def train_cloth_flow(opt, train_loader, generator, generator_module, gmm_model, 
                   % (step + 1, t, loss.item(), loss_structure.item(),
                      loss_vgg.item(), tv_loss.item()), flush=True)
 
-        board.add_scalar('LOSS/metric', loss.item(), step + 1)
-        board.add_scalar('LOSS/struc', loss_structure.item(), step + 1)
-        board.add_scalar('LOSS/VGG', loss_vgg.item(), step + 1)
-        board.add_scalar('LOSS/tv', tv_loss.item(), step + 1)
+        if single_gpu_flag(opt):
+            board.add_scalar('LOSS/metric', loss.item(), step + 1)
+            board.add_scalar('LOSS/struc', loss_structure.item(), step + 1)
+            board.add_scalar('LOSS/VGG', loss_vgg.item(), step + 1)
+            board.add_scalar('LOSS/tv', tv_loss.item(), step + 1)
 
         if (step + 1) % opt.save_count == 0 and single_gpu_flag(opt):
             save_checkpoint(generator_module, os.path.join(opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
             save_checkpoint(gmm_model_module,
                             os.path.join(opt.checkpoint_dir, opt.name, 'step_warp_%06d.pth' % (step + 1)))
 
+
+def compute_tv_loss(image, mask):
+    # shift one pixel and get difference (for both x and y direction)
+    # interpolated_mask_2 = F.interpolate(mask, size=(image.shape[2]-1, image.shape[3]),
+    #                                   mode='bilinear').repeat(1, image.shape[1], 1, 1)
+    # interpolated_mask_3 = F.interpolate(mask, size=(image.shape[2], image.shape[3]-1),
+    #                                   mode='bilinear').repeat(1, image.shape[1], 1, 1)
+    loss = torch.mean(torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])) + \
+           torch.mean(torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :]))
+    return loss
 
 def main():
     opt = get_opt()
